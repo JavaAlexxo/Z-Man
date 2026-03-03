@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Idle Game</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, sans-serif;
+      background: radial-gradient(circle at top, #1a1f3d, #090b18 55%);
+      color: #ecf0ff;
+      min-height: 100vh;
+    }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 24px; }
+    h1 { margin-bottom: 8px; }
+    .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+    .card {
+      background: rgba(17, 21, 43, 0.9);
+      border: 1px solid rgba(130, 149, 255, 0.28);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    }
+    button {
+      background: linear-gradient(135deg, #5d7bff, #7a59ff);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform .12s ease, filter .2s ease;
+      margin-top: 8px;
+      width: 100%;
+    }
+    button:hover { transform: translateY(-1px); filter: brightness(1.1); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .resources p, .generator p, .tip p { margin: 6px 0; }
+    .muted { opacity: .82; font-size: .92rem; }
+    .row { display: flex; justify-content: space-between; gap: 8px; }
+    .small { font-size: .84rem; opacity: .8; }
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(143, 161, 255, 0.15);
+      border: 1px solid rgba(143, 161, 255, 0.35);
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>🧠 Smart Idle Game</h1>
+    <p class="muted">Generate Energy, convert it to Data, and monetize Data into Credits. The AI advisor will suggest and auto-buy upgrades based on your chosen strategy.</p>
+
+    <section class="grid resources">
+      <article class="card">
+        <h3>Resources</h3>
+        <p>⚡ Energy: <strong id="energy">0</strong></p>
+        <p>💾 Data: <strong id="data">0</strong></p>
+        <p>💳 Credits: <strong id="credits">0</strong></p>
+        <button id="click-energy">Manual Boost (+1 Energy)</button>
+        <button id="convert">Convert 10 Energy → 1 Data</button>
+        <button id="sell">Sell 5 Data → 1 Credit</button>
+      </article>
+
+      <article class="card">
+        <h3>Strategy</h3>
+        <p class="small">Active mode controls advisor behavior.</p>
+        <div>
+          <span id="mode-balanced" class="pill">Balanced</span>
+          <span id="mode-aggressive" class="pill">Aggressive</span>
+          <span id="mode-saver" class="pill">Saver</span>
+        </div>
+        <button data-mode="balanced" class="mode-btn">Use Balanced</button>
+        <button data-mode="aggressive" class="mode-btn">Use Aggressive</button>
+        <button data-mode="saver" class="mode-btn">Use Saver</button>
+        <button id="toggle-autobuy">Auto-buy: ON</button>
+      </article>
+
+      <article class="card tip">
+        <h3>AI Advisor</h3>
+        <p id="tip">Starting simulation…</p>
+        <p class="small" id="projection"></p>
+      </article>
+    </section>
+
+    <h2>Generators</h2>
+    <section class="grid" id="generators"></section>
+  </main>
+
+  <script>
+    const STORE_KEY = "smart-idle-state-v1";
+    const now = () => Date.now();
+
+    const generatorDefs = [
+      { id: "panel", name: "Solar Panel", resource: "energy", baseCost: 10, growth: 1.17, baseRate: 0.45, description: "Generates passive Energy." },
+      { id: "lab", name: "Research Lab", resource: "data", baseCost: 50, growth: 1.21, baseRate: 0.12, description: "Converts simulation patterns into Data." },
+      { id: "broker", name: "Market Broker", resource: "credits", baseCost: 180, growth: 1.24, baseRate: 0.05, description: "Finds better Data buyers for Credits." }
+    ];
+
+    const state = {
+      energy: 0,
+      data: 0,
+      credits: 0,
+      mode: "balanced",
+      autoBuy: true,
+      generators: generatorDefs.reduce((acc, g) => {
+        acc[g.id] = { level: 0, purchased: 0 };
+        return acc;
+      }, {}),
+      lastUpdate: now(),
+      ticks: 0,
+      randomEventCooldown: 0
+    };
+
+    function load() {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      try {
+        const parsed = JSON.parse(raw);
+        Object.assign(state, parsed);
+        state.generators = { ...state.generators, ...parsed.generators };
+      } catch {
+        localStorage.removeItem(STORE_KEY);
+      }
+    }
+
+    function save() {
+      localStorage.setItem(STORE_KEY, JSON.stringify(state));
+    }
+
+    function fmt(n) {
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(2) + "K";
+      return n.toFixed(1);
+    }
+
+    function getCost(def) {
+      const lvl = state.generators[def.id].level;
+      return def.baseCost * Math.pow(def.growth, lvl);
+    }
+
+    function getProductionPerSec(resource) {
+      return generatorDefs
+        .filter(d => d.resource === resource)
+        .reduce((sum, d) => sum + state.generators[d.id].level * d.baseRate, 0);
+    }
+
+    function spend(cost) {
+      if (state.credits < cost) return false;
+      state.credits -= cost;
+      return true;
+    }
+
+    function buyGenerator(id) {
+      const def = generatorDefs.find(x => x.id === id);
+      const cost = getCost(def);
+      if (!spend(cost)) return false;
+      state.generators[id].level += 1;
+      state.generators[id].purchased += 1;
+      return true;
+    }
+
+    function advisorChoice() {
+      const options = generatorDefs.map(def => {
+        const cost = getCost(def);
+        const gain = def.baseRate;
+        let score = gain / cost;
+        if (state.mode === "aggressive" && def.resource === "credits") score *= 2;
+        if (state.mode === "saver") score *= 1 / Math.pow(def.growth, 0.3);
+        return { def, cost, score };
+      });
+      return options.sort((a, b) => b.score - a.score)[0];
+    }
+
+    function runAutoBuy() {
+      const best = advisorChoice();
+      if (!best) return;
+      const reserve = state.mode === "saver" ? 20 : 0;
+      if (state.credits - reserve >= best.cost) buyGenerator(best.def.id);
+    }
+
+    function randomSmartEvent() {
+      if (state.randomEventCooldown > 0) {
+        state.randomEventCooldown -= 1;
+        return;
+      }
+      if (Math.random() > 0.04) return;
+      const trends = [
+        { text: "Forecast spike: Data demand rises.", fx: () => (state.data += 2) },
+        { text: "Grid optimization: Bonus Energy packet.", fx: () => (state.energy += 12) },
+        { text: "Ad auction won: Instant Credits.", fx: () => (state.credits += 3) }
+      ];
+      const event = trends[Math.floor(Math.random() * trends.length)];
+      event.fx();
+      state.randomEventCooldown = 10;
+      document.getElementById("tip").textContent = "📡 " + event.text;
+    }
+
+    function tick(deltaSec) {
+      state.energy += getProductionPerSec("energy") * deltaSec;
+      state.data += getProductionPerSec("data") * deltaSec;
+      state.credits += getProductionPerSec("credits") * deltaSec;
+      state.ticks++;
+
+      if (state.autoBuy && state.ticks % 2 === 0) runAutoBuy();
+      randomSmartEvent();
+
+      if (state.energy >= 10) {
+        const batches = Math.floor(state.energy / 10);
+        state.energy -= batches * 10;
+        state.data += batches;
+      }
+      if (state.data >= 5) {
+        const sales = Math.floor(state.data / 5);
+        state.data -= sales * 5;
+        state.credits += sales;
+      }
+    }
+
+    function renderGenerators() {
+      const wrap = document.getElementById("generators");
+      wrap.innerHTML = "";
+      generatorDefs.forEach(def => {
+        const card = document.createElement("article");
+        card.className = "card generator";
+        const level = state.generators[def.id].level;
+        const cost = getCost(def);
+        card.innerHTML = `
+          <h3>${def.name}</h3>
+          <p class="small">${def.description}</p>
+          <p>Level: <strong>${level}</strong></p>
+          <p>Rate: +${def.baseRate.toFixed(2)} ${def.resource}/sec each</p>
+          <div class="row"><span>Cost:</span><strong>${fmt(cost)} credits</strong></div>
+          <button data-buy="${def.id}">Buy ${def.name}</button>
+        `;
+        wrap.appendChild(card);
+      });
+      wrap.querySelectorAll("[data-buy]").forEach(btn => {
+        btn.addEventListener("click", () => buyGenerator(btn.dataset.buy));
+      });
+    }
+
+    function render() {
+      document.getElementById("energy").textContent = fmt(state.energy);
+      document.getElementById("data").textContent = fmt(state.data);
+      document.getElementById("credits").textContent = fmt(state.credits);
+      document.getElementById("toggle-autobuy").textContent = `Auto-buy: ${state.autoBuy ? "ON" : "OFF"}`;
+      ["balanced", "aggressive", "saver"].forEach(mode => {
+        document.getElementById(`mode-${mode}`).style.opacity = state.mode === mode ? "1" : "0.45";
+      });
+
+      const best = advisorChoice();
+      document.getElementById("tip").textContent = best
+        ? `Best next purchase: ${best.def.name} (${fmt(best.cost)} credits).`
+        : "Collect credits to start optimizing.";
+
+      const e = getProductionPerSec("energy");
+      const d = getProductionPerSec("data");
+      const c = getProductionPerSec("credits");
+      document.getElementById("projection").textContent = `Projected passive rates — Energy: ${e.toFixed(2)}/s, Data: ${d.toFixed(2)}/s, Credits: ${c.toFixed(2)}/s`;
+
+      renderGenerators();
+    }
+
+    function bindUI() {
+      document.getElementById("click-energy").addEventListener("click", () => (state.energy += 1));
+      document.getElementById("convert").addEventListener("click", () => {
+        if (state.energy >= 10) {
+          state.energy -= 10;
+          state.data += 1;
+        }
+      });
+      document.getElementById("sell").addEventListener("click", () => {
+        if (state.data >= 5) {
+          state.data -= 5;
+          state.credits += 1;
+        }
+      });
+      document.querySelectorAll(".mode-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          state.mode = btn.dataset.mode;
+        });
+      });
+      document.getElementById("toggle-autobuy").addEventListener("click", () => {
+        state.autoBuy = !state.autoBuy;
+      });
+    }
+
+    function startLoop() {
+      let prev = now();
+      setInterval(() => {
+        const current = now();
+        const delta = Math.min((current - prev) / 1000, 3);
+        prev = current;
+        tick(delta);
+        render();
+        save();
+      }, 200);
+    }
+
+    function applyOfflineProgress() {
+      const elapsed = Math.max(0, (now() - (state.lastUpdate || now())) / 1000);
+      if (elapsed > 1) tick(Math.min(elapsed, 300));
+      state.lastUpdate = now();
+    }
+
+    load();
+    bindUI();
+    applyOfflineProgress();
+    render();
+    startLoop();
+
+    window.addEventListener("beforeunload", () => {
+      state.lastUpdate = now();
+      save();
+    });
+  </script>
+</body>
+</html>
